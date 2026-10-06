@@ -1,0 +1,351 @@
+﻿{
+    "definition": {
+        "$schema": "https://schema.management.azure.com/providers/Microsoft.Logic/schemas/2016-06-01/workflowdefinition.json#",
+        "contentVersion": "1.0.0.0",
+        "triggers": {
+            "Microsoft_Sentinel_incident": {
+                "type": "ApiConnectionWebhook",
+                "inputs": {
+                    "host": {
+                        "connection": {
+                            "name": "@parameters('$connections')['azuresentinel']['connectionId']"
+                        }
+                    },
+                    "body": {
+                        "callback_url": "@listCallbackUrl()"
+                    },
+                    "path": "/incident-creation"
+                }
+            }
+        },
+        "actions": {
+            "Entities_-_Get_IPs": {
+                "runAfter": {},
+                "type": "ApiConnection",
+                "inputs": {
+                    "host": {
+                        "connection": {
+                            "name": "@parameters('$connections')['azuresentinel-1']['connectionId']"
+                        }
+                    },
+                    "method": "post",
+                    "body": "@triggerBody()?['object']?['properties']?['relatedEntities']",
+                    "path": "/entities/ip"
+                }
+            },
+            "Parse_JSON": {
+                "runAfter": {
+                    "HTTP": [
+                        "Succeeded"
+                    ]
+                },
+                "type": "ParseJson",
+                "inputs": {
+                    "content": "@body('HTTP')",
+                    "schema": {
+                        "type": "object",
+                        "properties": {
+                            "verdict": {
+                                "type": "string"
+                            },
+                            "risk_score": {
+                                "type": "integer"
+                            },
+                            "confidence": {
+                                "type": "integer"
+                            },
+                            "recommended_action": {
+                                "type": "string"
+                            },
+                            "summary": {
+                                "type": "string"
+                            },
+                            "blast_radius": {
+                                "type": "string"
+                            },
+                            "escalation_note": {
+                                "type": "string"
+                            },
+                            "mitre": {
+                                "type": "array",
+                                "items": {
+                                    "type": "string"
+                                }
+                            },
+                            "hunting_query": {
+                                "type": "string"
+                            },
+                            "suspect_ip": {
+                                "type": "string"
+                            },
+                            "score_factors": {
+                                "type": "array",
+                                "items": {
+                                    "type": "string"
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            "Condition": {
+                "actions": {
+                    "Condition_1": {
+                        "actions": {},
+                        "else": {
+                            "actions": {
+                                "HTTP_1": {
+                                    "type": "Http",
+                                    "inputs": {
+                                        "uri": "https://management.azure.com/subscriptions/<SUBSCRIPTION_ID>/resourceGroups/rg-aegis/providers/Microsoft.Network/networkSecurityGroups/vm-test1-nsg/securityRules/aegis-auto-block?api-version=2023-05-01",
+                                        "method": "PUT",
+                                        "headers": {
+                                            "Content-Type": "application/json"
+                                        },
+                                        "body": {
+                                            "properties": {
+                                                "protocol": "*",
+                                                "access": "Deny",
+                                                "direction": "Inbound",
+                                                "sourcePortRange": "*",
+                                                "destinationPortRange": "*",
+                                                "sourceAddressPrefix": "@{first(body('Entities_-_Get_IPs')?['IPs'])?['Address']}",
+                                                "destinationAddressPrefix": "*",
+                                                "priority": 100
+                                            }
+                                        },
+                                        "authentication": {
+                                            "type": "ManagedServiceIdentity",
+                                            "audience": "https://management.azure.com/"
+                                        }
+                                    },
+                                    "runtimeConfiguration": {
+                                        "contentTransfer": {
+                                            "transferMode": "Chunked"
+                                        }
+                                    }
+                                },
+                                "Send_an_email_(V2)-copy": {
+                                    "runAfter": {
+                                        "HTTP_1": [
+                                            "Succeeded"
+                                        ]
+                                    },
+                                    "type": "ApiConnection",
+                                    "inputs": {
+                                        "host": {
+                                            "connection": {
+                                                "name": "@parameters('$connections')['outlook']['connectionId']"
+                                            }
+                                        },
+                                        "method": "post",
+                                        "body": {
+                                            "To": "<ANALYST_EMAIL>",
+                                            "Subject": "Aegis Alert:  Ip @{body('Parse_JSON')?['suspect_ip']} blocked Automatically",
+                                            "Body": "<p class=\"editor-paragraph\">Suspect IP: @{body('Parse_JSON')?['suspect_ip']}<br>Verdict: @{body('Parse_JSON')?['verdict']} (risk @{body('Parse_JSON')?['risk_score']}/100)<br>Recommended action: @{body('Parse_JSON')?['recommended_action']}<br>Evidence coverage: @{body('Parse_JSON')?['confidence']}/100<br><br>Summary: @{body('Parse_JSON')?['summary']}<br><br>Blast radius: @{body('Parse_JSON')?['blast_radius']}<br><br>Escalation note: @{body('Parse_JSON')?['escalation_note']}<br><br>MITRE ATT&amp;CK: @{join(body('Parse_JSON')?['mitre'], ', ')}<br><br>Why this score: @{join(body('Parse_JSON')?['score_factors'], ' | ')}<br><br>Hunting query: @{body('Parse_JSON')?['hunting_query']}</p><br><p class=\"editor-paragraph\">To Undo: open the NSG vm-test1-nsg, go to Inbound security rules, and delete the rule named aegis-auto-block</p>",
+                                            "Importance": "Normal"
+                                        },
+                                        "path": "/v2/Mail"
+                                    }
+                                }
+                            }
+                        },
+                        "expression": {
+                            "and": [
+                                {
+                                    "contains": [
+                                        "@string(triggerBody()?['object']?['properties']?['labels'])",
+                                        "aegis-blocked"
+                                    ]
+                                }
+                            ]
+                        },
+                        "type": "If"
+                    }
+                },
+                "runAfter": {
+                    "Parse_JSON": [
+                        "Succeeded"
+                    ]
+                },
+                "else": {
+                    "actions": {
+                        "Condition_2": {
+                            "actions": {
+                                "Send_an_email_(V2)": {
+                                    "type": "ApiConnection",
+                                    "inputs": {
+                                        "host": {
+                                            "connection": {
+                                                "name": "@parameters('$connections')['outlook']['connectionId']"
+                                            }
+                                        },
+                                        "method": "post",
+                                        "body": {
+                                            "To": "<ANALYST_EMAIL>",
+                                            "Subject": "Aegis Alert: @{body('Parse_JSON')?['verdict']} | Risk @{body('Parse_JSON')?['risk_score']} | @{body('Parse_JSON')?['suspect_ip']}",
+                                            "Body": "<p class=\"editor-paragraph\">Suspect IP: @{body('Parse_JSON')?['suspect_ip']}<br>Verdict: @{body('Parse_JSON')?['verdict']} (risk @{body('Parse_JSON')?['risk_score']}/100)<br>Recommended action: @{body('Parse_JSON')?['recommended_action']}<br>Evidence coverage: @{body('Parse_JSON')?['confidence']}/100<br><br>Summary: @{body('Parse_JSON')?['summary']}<br><br>Blast radius: @{body('Parse_JSON')?['blast_radius']}<br><br>Escalation note: @{body('Parse_JSON')?['escalation_note']}<br><br>MITRE ATT&amp;CK: @{join(body('Parse_JSON')?['mitre'], ', ')}<br><br>Why this score: @{join(body('Parse_JSON')?['score_factors'], ' | ')}<br><br>Hunting query: @{body('Parse_JSON')?['hunting_query']}</p>",
+                                            "Importance": "Normal"
+                                        },
+                                        "path": "/v2/Mail"
+                                    }
+                                }
+                            },
+                            "else": {
+                                "actions": {
+                                    "Add_comment_to_incident_(V3)": {
+                                        "type": "ApiConnection",
+                                        "inputs": {
+                                            "host": {
+                                                "connection": {
+                                                    "name": "@parameters('$connections')['azuresentinel-2']['connectionId']"
+                                                }
+                                            },
+                                            "method": "post",
+                                            "body": {
+                                                "incidentArmId": "@triggerBody()?['object']?['id']",
+                                                "message": "<p class=\"editor-paragraph\">Aegis AI triage: benign, @{body('Parse_JSON')?['risk_score']}</p><br><p class=\"editor-paragraph\">Email skipped.</p><br><p class=\"editor-paragraph\">Summary : @{body('Parse_JSON')?['summary']}</p>"
+                                            },
+                                            "path": "/Incidents/Comment"
+                                        }
+                                    }
+                                }
+                            },
+                            "expression": {
+                                "or": [
+                                    {
+                                        "greaterOrEquals": [
+                                            "@body('Parse_JSON')?['risk_score']",
+                                            40
+                                        ]
+                                    },
+                                    {
+                                        "not": {
+                                            "contains": [
+                                                "@body('Parse_JSON')?['verdict']",
+                                                "benign"
+                                            ]
+                                        }
+                                    }
+                                ]
+                            },
+                            "type": "If"
+                        }
+                    }
+                },
+                "expression": {
+                    "and": [
+                        {
+                            "equals": [
+                                "@body('Parse_JSON')?['verdict']",
+                                "malicious"
+                            ]
+                        },
+                        {
+                            "equals": [
+                                "@body('Parse_JSON')?['recommended_action']",
+                                "block_source"
+                            ]
+                        },
+                        {
+                            "equals": [
+                                "",
+                                ""
+                            ]
+                        }
+                    ]
+                },
+                "type": "If"
+            },
+            "HTTP": {
+                "runAfter": {
+                    "Entities_-_Get_IPs": [
+                        "Succeeded"
+                    ]
+                },
+                "type": "Http",
+                "inputs": {
+                    "uri": "https://<FUNCTION_APP>.azurewebsites.net/api/triage?code=<FUNCTION_KEY>",
+                    "method": "POST",
+                    "headers": {
+                        "Content-Type": "application/json"
+                    },
+                    "body": {
+                        "rule_name": "@{triggerBody()?['object']?['properties']?['title']}",
+                        "src_ip": "@{first(body('Entities_-_Get_IPs')?['IPs'])?['Address']}",
+                        "dst_ip": "@{last(body('Entities_-_Get_IPs')?['IPs'])?['Address']}",
+                        "time": "@{triggerBody()?['object']?['properties']?['createdTimeUtc']}"
+                    }
+                },
+                "runtimeConfiguration": {
+                    "contentTransfer": {
+                        "transferMode": "Chunked"
+                    }
+                }
+            },
+            "Send_an_email_(V2)-copy_1": {
+                "runAfter": {
+                    "Parse_JSON": [
+                        "Failed",
+                        "Skipped",
+                        "TimedOut"
+                    ]
+                },
+                "type": "ApiConnection",
+                "inputs": {
+                    "host": {
+                        "connection": {
+                            "name": "@parameters('$connections')['outlook']['connectionId']"
+                        }
+                    },
+                    "method": "post",
+                    "body": {
+                        "To": "<ANALYST_EMAIL>",
+                        "Subject": "Aegis : Triage failed, review manually",
+                        "Body": "<p class=\"editor-paragraph\">The AI triage failed or returned nothing. No block was made. Check this incident manually.</p><br><p class=\"editor-paragraph\">Title : @{triggerBody()?['object']?['properties']?['title']}</p><br><p class=\"editor-paragraph\">Severity :@{triggerBody()?['object']?['properties']?['severity']}</p>",
+                        "Importance": "Normal"
+                    },
+                    "path": "/v2/Mail"
+                }
+            }
+        },
+        "outputs": {},
+        "parameters": {
+            "$connections": {
+                "type": "Object",
+                "defaultValue": {}
+            }
+        }
+    },
+    "parameters": {
+        "$connections": {
+            "type": "Object",
+            "value": {
+                "azuresentinel": {
+                    "id": "/subscriptions/<SUBSCRIPTION_ID>/providers/Microsoft.Web/locations/uaenorth/managedApis/azuresentinel",
+                    "connectionId": "/subscriptions/<SUBSCRIPTION_ID>/resourceGroups/rg-aegis/providers/Microsoft.Web/connections/azuresentinel",
+                    "connectionName": "azuresentinel",
+                    "connectionProperties": {}
+                },
+                "azuresentinel-1": {
+                    "id": "/subscriptions/<SUBSCRIPTION_ID>/providers/Microsoft.Web/locations/uaenorth/managedApis/azuresentinel",
+                    "connectionId": "/subscriptions/<SUBSCRIPTION_ID>/resourceGroups/rg-aegis/providers/Microsoft.Web/connections/azuresentinel",
+                    "connectionName": "azuresentinel",
+                    "connectionProperties": {}
+                },
+                "outlook": {
+                    "id": "/subscriptions/<SUBSCRIPTION_ID>/providers/Microsoft.Web/locations/uaenorth/managedApis/outlook",
+                    "connectionId": "/subscriptions/<SUBSCRIPTION_ID>/resourceGroups/rg-aegis/providers/Microsoft.Web/connections/outlook",
+                    "connectionName": "outlook",
+                    "connectionProperties": {}
+                },
+                "azuresentinel-2": {
+                    "id": "/subscriptions/<SUBSCRIPTION_ID>/providers/Microsoft.Web/locations/uaenorth/managedApis/azuresentinel",
+                    "connectionId": "/subscriptions/<SUBSCRIPTION_ID>/resourceGroups/rg-aegis/providers/Microsoft.Web/connections/azuresentinel",
+                    "connectionName": "azuresentinel",
+                    "connectionProperties": {}
+                }
+            }
+        }
+    }
+}
